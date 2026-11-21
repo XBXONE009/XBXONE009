@@ -1,12 +1,16 @@
 import sys
 import random
 import time
+import pygame  # NUEVO: Usamos pygame porque winsound no soporta .mp3
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QLabel, QPushButton, QTextEdit, QFrame, QLineEdit
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QTextCursor
+
+# Inicializamos el mezclador de audio de pygame para los MP3
+pygame.mixer.init()
 
 # ==============================================================================
 # LÓGICA DE LA SIMULACIÓN (Base libre de bloqueos y riesgos, control manual)
@@ -26,6 +30,7 @@ class Celda:
         self.visitado = 0
         self.prioridad = 0
         self.nombre = ""
+        self.movil = False  # NUEVO: Define si esta entidad tiene permiso para moverse aleatoriamente
 
 
 class Dron:
@@ -48,6 +53,7 @@ def inicializarGrid(grid):
             grid[i][j].visitado = 0
             grid[i][j].prioridad = 0
             grid[i][j].nombre = ""
+            grid[i][j].movil = False  # NUEVO: Reseteamos la propiedad en cada nueva partida
 
     # Base en la esquina superior izquierda (nunca tapada)
     grid[BASE_X][BASE_Y].tipo = 'B'
@@ -74,6 +80,8 @@ def inicializarGrid(grid):
             continue
         if grid[rx][ry].tipo == ' ':
             grid[rx][ry].tipo = 'X'
+            # NUEVO: Solo un 30% de los obstáculos serán móviles
+            grid[rx][ry].movil = (random.random() < 0.3)
             colocados_x += 1
 
     # Zonas de riesgo ('!') aleatorias directas sin tapar la base
@@ -87,6 +95,20 @@ def inicializarGrid(grid):
         if grid[rx][ry].tipo == ' ':
             grid[rx][ry].tipo = '!'
             colocados_riesgo += 1
+
+    # Saqueadores ('S') aleatorios directos sin tapar la base
+    num_saqueadores = 4
+    colocados_s = 0
+    while colocados_s < num_saqueadores:
+        rx = random.randint(0, FILAS - 1)
+        ry = random.randint(0, COLS - 1)
+        if (rx, ry) in protegidas_base:
+            continue
+        if grid[rx][ry].tipo == ' ':
+            grid[rx][ry].tipo = 'S'
+            # NUEVO: Solo un 50% de los saqueadores se moverán patrullando
+            grid[rx][ry].movil = (random.random() < 0.5)
+            colocados_s += 1
 
 
 def simularClima(viento, lluvia, alerta):
@@ -227,8 +249,24 @@ def moverDron(grid, objetivos, numObjetivos, d, viento, lluvia, alerta, turno, f
     d.bateria -= consumo
     if d.bateria < 0:
         d.bateria = 0
+        
     if seMovio:
+        # NUEVO: Reproducimos el MP3. Usamos try/except por si el archivo no existe
+        try:
+            pygame.mixer.music.load("dron.mp3")
+            pygame.mixer.music.play()
+        except Exception as e:
+            pass # Si no encuentra el MP3, simplemente no suena pero no detiene el juego
+        
         print(f"Dron avanza. Bat: {d.bateria}%")
+        
+        if viento > 15 and random.random() < 0.25:
+            vdx, vdy = random.choice([(-1,0), (1,0), (0,-1), (0,1)])
+            vnx, vny = d.x + vdx, d.y + vdy
+            if 0 <= vnx < FILAS and 0 <= vny < COLS and grid[vnx][vny].tipo != 'X':
+                d.x = vnx
+                d.y = vny
+                print(f"¡RÁFAGA DE VIENTO! El dron ha sido empujado aleatoriamente a ({d.x}, {d.y}).")
 
     if finJuego == 0 and not (d.x == BASE_X and d.y == BASE_Y):
         enZonaRiesgo = (grid[d.x][d.y].tipo == '!')
@@ -236,6 +274,11 @@ def moverDron(grid, objetivos, numObjetivos, d, viento, lluvia, alerta, turno, f
             print("Dron en zona de riesgo. Evaluando replica...")
         if evaluarReplicaCortanteBasal(turno, enZonaRiesgo):
             print("REPLICA DETECTADA! Mantente alerta y continua con precaucion.")
+            
+    if finJuego == 0 and grid[d.x][d.y].tipo == 'S':
+        print("¡ALERTA MÁXIMA! El dron ha caído en manos de saqueadores y ha sido secuestrado.")
+        finJuego = 1
+        causaAborto = 5
 
     if finJuego == 0 and grid[d.x][d.y].tipo == 'O' and grid[d.x][d.y].visitado == 0:
         grid[d.x][d.y].visitado = 1
@@ -393,6 +436,7 @@ class DronGUI(QWidget):
             'O': "background-color: #003300; border: 2px solid #00FF00; color: #00FF00;",
             'X': "background-color: #330000; border: 2px solid #FF0000; color: #FF0000;",
             '!': "background-color: #332200; border: 2px solid #FFAA00; color: #FFAA00;",
+            'S': "background-color: #440044; border: 2px solid #FF00FF; color: #FF00FF;",
             ' ': "background-color: #1A1A1A; border: 1px solid #333333; color: #1A1A1A;"
         }
         estilo_dron = "background-color: #004444; border: 3px solid #00FFFF; color: #00FFFF; font-weight: bold;"
@@ -419,7 +463,12 @@ class DronGUI(QWidget):
             if k > 0:
                 print(" |", end="")
             print(f" {self.objetivos[k].nombre} (prioridad {self.objetivos[k].prioridad})", end="")
-        print("\nComandos disponibles: move up, move down, move left, move right")
+            
+        print("\nComandos disponibles:")
+        print("- move up: mover arriba")
+        print("- move down: mover abajo")
+        print("- move right: mover derecha")
+        print("- move left: mover izquierda")
         print("==========================================================")
 
         if self.viento > 50 or self.lluvia > 40:
@@ -450,17 +499,46 @@ class DronGUI(QWidget):
 
         self.viento, self.lluvia, self.alerta = simularClima(self.viento, self.lluvia, self.alerta)
 
+        # NUEVO: Filtramos para que SOLO los obstáculos que marcamos como móviles participen
+        obstaculos = [(i, j) for i in range(FILAS) for j in range(COLS) if self.grid[i][j].tipo == 'X' and self.grid[i][j].movil]
+        for ox, oy in obstaculos:
+            if random.random() < 0.2:
+                dx, dy = random.choice([(-1, 0), (1, 0), (0, -1), (0, 1)])
+                nx, ny = ox + dx, oy + dy
+                if 0 <= nx < FILAS and 0 <= ny < COLS and self.grid[nx][ny].tipo == ' ':
+                    self.grid[nx][ny].tipo = 'X'
+                    self.grid[nx][ny].movil = True   # El nuevo espacio hereda la movilidad
+                    self.grid[ox][oy].tipo = ' '
+                    self.grid[ox][oy].movil = False  # El espacio viejo deja de ser móvil
+                    
+        # NUEVO: Filtramos para que SOLO los saqueadores marcados como móviles participen
+        saqueadores = [(i, j) for i in range(FILAS) for j in range(COLS) if self.grid[i][j].tipo == 'S' and self.grid[i][j].movil]
+        for sx, sy in saqueadores:
+            if random.random() < 0.3:
+                dx, dy = random.choice([(-1, 0), (1, 0), (0, -1), (0, 1)])
+                nx, ny = sx + dx, sy + dy
+                if 0 <= nx < FILAS and 0 <= ny < COLS and self.grid[nx][ny].tipo == ' ':
+                    self.grid[nx][ny].tipo = 'S'
+                    self.grid[nx][ny].movil = True   # El nuevo espacio hereda la movilidad
+                    self.grid[sx][sy].tipo = ' '
+                    self.grid[sx][sy].movil = False  # El espacio viejo deja de ser móvil
+                    if nx == self.wing.x and ny == self.wing.y:
+                        print("¡ALERTA MÁXIMA! Un saqueador se movió hacia ti y ha secuestrado al dron.")
+                        self.finJuego = 1
+                        self.causaAborto = 5
+
         nombreAlerta = "NORMAL"
         if self.alerta == 1:
             nombreAlerta = "PRECAUCION"
         if self.alerta == 2:
             nombreAlerta = "PELIGRO"
 
-        self.finJuego, self.causaAborto = moverDron(
-            self.grid, self.objetivos, self.numObjetivos, self.wing,
-            self.viento, self.lluvia, self.alerta, self.turno,
-            self.finJuego, self.causaAborto, comandoManual
-        )
+        if self.finJuego == 0:
+            self.finJuego, self.causaAborto = moverDron(
+                self.grid, self.objetivos, self.numObjetivos, self.wing,
+                self.viento, self.lluvia, self.alerta, self.turno,
+                self.finJuego, self.causaAborto, comandoManual
+            )
 
         self.actualizar_vista_grid()
         self.actualizar_stats()
@@ -543,6 +621,8 @@ class DronGUI(QWidget):
                 print("Actividad sismica / replica")
             elif self.causaAborto == 4:
                 print("Dron bloqueado por escombros")
+            elif self.causaAborto == 5:
+                print("Dron SECUESTRADO por saqueadores")
             else:
                 print("No completada")
         print(f"Turnos totales: {self.turno}")
